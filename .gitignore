@@ -1,0 +1,6 @@
+# generated instances and raw solver logs (regenerate with gen_*.py / run_bench.py)
+instances/
+results/logs/
+*.cnf
+__pycache__/
+*.pyc
