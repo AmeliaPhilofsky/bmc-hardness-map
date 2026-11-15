@@ -1,7 +1,7 @@
 # bmc-hardness-map
 Mini project: mapping which circuit structures classical SAT/BMC solvers struggle with, to find candidates for quantum hand-off
 
-All instances so far are satisfiable by construction; unsatisfiable properties (equivalence miters, HWMCC benchmarks) are next.
+Phase 1 instances are satisfiable by construction (planted solutions). Phase 2 adds unsatisfiable equivalence miters on the same circuits (`gen_miter.py`), with DRAT proof checking; HWMCC benchmarks come after.
 
 ## Files
 
@@ -12,7 +12,9 @@ All instances so far are satisfiable by construction; unsatisfiable properties (
 | `run_bench.py` | Runs every solver configuration, writes a resumable CSV |
 | `summarize.py` | Medians / timeouts per point, lists wrong answers |
 | `seq.py`, `gen_seq.py` | Sequential circuits (registers, unrolled to bound k) |
-| `run_xor_main.sh`, `run_xor3_main.sh`, `run_depth.sh`, `run_seq_pilot.sh` | One-command runs for each study |
+| `miter.py`, `gen_miter.py` | Equivalence miters: each circuit against a restructured equivalent copy (UNSAT) |
+| `test_miter.py` | Exhaustive correctness checks of the miters on small circuits |
+| `run_xor_main.sh`, `run_xor3_main.sh`, `run_depth.sh`, `run_seq_pilot.sh`, `run_miter_pilot.sh`, `run_miter_grid.sh` | One-command runs for each study |
 
 All of it is standard-library Python (works with Rocky 9's `python3`). Run everything from `bash`, not tcsh.
 
@@ -58,7 +60,7 @@ CNF solvers run with `--solver-seeds` different random seeds (default 3). SBY/EB
 
 ## Output columns (`results/*.csv`)
 
-instance, family, nonlinear, inputs, gates, xor_pct, n_xor, circuit_seed, depth, degenerate, config, solver_seed, verdict (SAT/UNSAT/TIMEOUT/UNKNOWN), expected, verified, timeout, wall_s, cpu_s, peak_mem_mb, conflicts, decisions, propagations, restarts, vars, clauses, xor_clauses, returncode, host, date, log.
+instance, family, nonlinear, inputs, gates, xor_pct, n_xor, circuit_seed, depth, degenerate, config, solver_seed, verdict (SAT/UNSAT/TIMEOUT/UNKNOWN), expected, verified, timeout, wall_s, cpu_s, peak_mem_mb, conflicts, decisions, propagations, restarts, vars, clauses, xor_clauses, returncode, host, date, log, proof, proof_s, proof_mb (the last three only with `--proof`).
 
 Wall/CPU time and peak memory come from the kernel for each run (CPU includes the tool's child processes). Raw logs are kept in `results/logs/`, with solver model lines removed once verified.
 
@@ -86,6 +88,32 @@ Wall/CPU time and peak memory come from the kernel for each run (CPU includes th
 **Tool details.** CNF solvers get the unrolled CNF (inputs are variables 1..k·I, step t bit i → t·I+i+1). SBY runs `depth k`; EBMC runs `--bound k−1` (k−1 transitions = steps 0..k−1). The Verilog uses a step counter and an `ok` register, and asserts that the trace is *not* reproducible, so a counterexample (FAIL/REFUTED) = SAT.
 
 **Checks done.** For small circuits (1–2 inputs, 0–3 registers, 3–4 steps) every input sequence was enumerated: all three CNF encodings have exactly as many solutions as brute-force simulation, the Verilog netlist evaluates identically to the simulator, and the targets embedded in the Verilog match.
+
+## Property card: equivalence miters (UNSAT)
+
+**Question.** Are the circuit structures that are hard to *satisfy* also hard to *refute*? Proving that no solution exists is where the literature locates XOR hardness, and the sub-problems CDCL gets stuck on are often unsatisfiable.
+
+**Circuits.** Exactly the circuits of the SAT studies: same topology, seeds, wiring and nested XOR sets (`gen_miter.py` takes the same size, window, XOR and seed options as `gen_xor.py`).
+
+**Property: equivalence miter.** Each circuit C is paired with a copy C' that computes the same function from different gates, and the question is whether some input x gives C(x) != C'(x). The answer is UNSAT by construction. The copy rewrites each gate:
+- MUX `s ? A : B` becomes `(s & A) | (~s & B)` or `B ^ (s & (A ^ B))` (chosen at random per gate);
+- XOR3 `A ^ B ^ S` becomes two 2-input XORs, with the association chosen at random;
+- AND stays AND.
+
+Every gate of C still has an equivalent point inside C' (as after light logic synthesis), so these are structurally similar equivalence checks, the kind an equivalence checker meets after a synthesis step. Restructuring with ABC (no internal equivalence points) is a planned harder variant. In Verilog the miter asserts `y == z`, so for SBY/EBMC a PASS/PROVED = UNSAT.
+
+**Encodings.** The same three as the SAT studies (`tseitin`, `aig`, `xnative`), applied to both circuits and to the output comparison. Inputs are variables 1..I.
+
+**Checking UNSAT answers.** With `run_bench.py --proof`, Kissat and CaDiCaL write a DRAT proof (solver seed 0 only, since proofs can be large) and `drat-trim` checks it: column `proof` = VERIFIED / FAILED / UNCHECKED (checker timed out), with `proof_s` and `proof_mb`. A FAILED proof is reported as a wrong answer. CryptoMiniSat, SBY and EBMC UNSAT answers are not proof-checked. Any SAT answer on a miter is reported as wrong; the harness also simulates both circuits on the returned input (`verified=1` would mean the copy is not equivalent, i.e. a generator bug).
+
+**Checks done.** `test_miter.py`: on 240 small circuits (3-8 inputs, MUX/XOR3, MUX/XOR and AND/XOR gate sets, 0-100% XOR) the copy matches the original on every input, and in all three encodings every input assignment runs into a conflict by unit propagation, which proves the CNF unsatisfiable. With one copy gate broken, the CNF models are exactly the inputs where the circuits differ.
+
+**Setup on the server.** `drat-trim` is needed for `--proof`:
+```bash
+git clone https://github.com/marijnheule/drat-trim.git ~/drat-trim && make -C ~/drat-trim
+export PATH=~/drat-trim:$PATH        # tcsh: setenv PATH ~/drat-trim:$PATH
+```
+Proofs are written to `--tmp` (`PROOF_TMP` in the run scripts, default `/tmp`) and deleted after checking; check free space with `df -h /tmp ~` first.
 
 ## Audit of the XOR study (10 Nov)
 

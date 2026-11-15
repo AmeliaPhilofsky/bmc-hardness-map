@@ -84,7 +84,7 @@ def main():
                         f.write(C.verilog(topo, types, target))
                     with open(os.path.join(d, "top.sby"), "w") as f:
                         f.write(C.SBY_TEMPLATE)
-                    n_xor = sum(1 for t in types if t == C.XOR)
+                    n_xor = sum(1 for t in types if t in (C.XOR, C.XOR3))
                     degenerate = func["const_outputs"] > 0 or func["dup_outputs"] > 0
                     flagged += int(degenerate)
                     rec = {

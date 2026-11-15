@@ -92,7 +92,7 @@ def main():
                             "observe": args.observe, "expected": "SAT",
                             "inputs": I, "outputs": O, "gates": args.gates, "window": W,
                             "seed": seed, "topo_seed": c.topo_seed, "xor_pct": pct,
-                            "n_xor": sum(1 for t in c.types if t == C.XOR),
+                            "n_xor": sum(1 for t in c.types if t in (C.XOR, C.XOR3)),
                             "regs": R, "bound": k, "model_vars": k * I, "ebmc_bound": k - 1,
                             "depth": feats["depth"],
                             "min_output_support": feats["min_output_support"],

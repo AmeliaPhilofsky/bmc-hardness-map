@@ -12,6 +12,12 @@
   returned input values. A wrong answer is marked verified=0 and printed.
 * SBY and EBMC are slow to start, so by default they only run on circuit
   seeds < --tool-seeds (see CONFIGS).
+* UNSAT answers (equivalence miters, gen_miter.py) can be checked too: with
+  --proof, Kissat and CaDiCaL write a DRAT proof that drat-trim checks
+  (proof column: VERIFIED / FAILED / UNCHECKED). CryptoMiniSat, SBY and EBMC
+  UNSAT answers are not proof-checked. A SAT answer on a miter is checked by
+  simulating both circuits: verified=1 there means a real difference, i.e. a
+  generator bug.
 
 Python 3.9+, standard library only.
 """
@@ -34,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import circuits as C  # noqa: E402
+import miter as M  # noqa: E402
 import seq as Q  # noqa: E402
 
 # name -> (input file, command template, kind)
@@ -53,13 +60,15 @@ CONFIGS = {
 DEFAULT_CONFIGS = ["kissat", "cadical", "cms", "cms_gauss", "cms_gauss_xnat",
                    "kissat_aig", "sby_yices", "ebmc_cadical"]
 SLOW_KINDS = ("sby", "ebmc")   # run once (one "seed"), on a subset of circuits
+PROOF_SOLVERS = ("kissat", "cadical")   # write DRAT proofs as a second positional argument
 
 FIELDS = ["instance", "family", "nonlinear", "inputs", "gates", "regs", "bound", "observe",
           "xor_pct", "n_xor",
           "circuit_seed", "window", "depth", "true_depth", "xor_arity", "degenerate", "config", "solver_seed",
           "verdict", "expected", "verified", "timeout", "wall_s", "cpu_s",
           "peak_mem_mb", "conflicts", "decisions", "propagations", "restarts",
-          "vars", "clauses", "xor_clauses", "returncode", "host", "date", "log"]
+          "vars", "clauses", "xor_clauses", "returncode", "host", "date", "log",
+          "proof", "proof_s", "proof_mb"]
 
 STAT_RE = re.compile(r"^c\s+(conflicts|decisions|propagations|restarts)\s*:\s*"
                      r"([0-9]+(?:\.[0-9]+)?)\s*([KMG])?\b", re.I)
@@ -115,9 +124,17 @@ def _limit_cpu(timeout):
     resource.setrlimit(resource.RLIMIT_CPU, (soft, soft + 30))
 
 
-def run_one(cmd, cwd, timeout, log_path):
+def parse_drat(text):
+    if "s VERIFIED" in text:
+        return "VERIFIED"
+    if "s NOT VERIFIED" in text:
+        return "FAILED"
+    return "UNCHECKED"
+
+
+def run_one(cmd, cwd, timeout, log_path, mode="w"):
     """Run cmd, return (wall, cpu, maxrss_kb, returncode, timed_out)."""
-    with open(log_path, "w") as logf:
+    with open(log_path, mode) as logf:
         t0 = time.perf_counter()
         p = subprocess.Popen(cmd, shell=True, cwd=cwd, stdout=logf,
                              stderr=subprocess.STDOUT, start_new_session=True,
@@ -157,7 +174,10 @@ def verify(inst, model):
     x = [model.get(i + 1, 0) for i in range(inst["inputs"])]
     topo = inst["_topo"]
     vals = C.simulate(topo, inst["_types"], x)
-    return int([vals[o] for o in topo.outputs] == inst["target"])
+    outs = [vals[o] for o in topo.outputs]
+    if inst.get("family") == "miter":   # 1 = the two circuits really differ on x
+        return int(outs != inst["_copy"].outputs_of(x))
+    return int(outs == inst["target"])
 
 
 def load_instance(rec):
@@ -176,6 +196,10 @@ def load_instance(rec):
     full["_topo"] = topo
     xk = C.XOR3 if full.get("xor_arity", 2) == 3 else C.XOR
     full["_types"] = topo.gate_types(full["xor_pct"], nl, xk)
+    if full.get("family") == "miter":
+        full["_copy"] = M.Copy(topo, full["_types"], full["topo_seed"])
+        if len(full["_copy"].nodes) != full["copy_nodes"]:
+            raise RuntimeError("rebuilt copy differs from generated one: " + rec["name"])
     return full
 
 
@@ -199,6 +223,14 @@ def main():
     ap.add_argument("--filter", default="", help="only instances whose name contains this")
     ap.add_argument("--logs", default="", help="keep raw logs here (default: next to CSV)")
     ap.add_argument("--dry-run", action="store_true", help="print the task count and exit")
+    ap.add_argument("--proof", action="store_true",
+                    help="check UNSAT answers of kissat/cadical configs with DRAT proofs (drat-trim)")
+    ap.add_argument("--proof-seeds", type=int, default=1,
+                    help="only write proofs for solver seeds below this (proofs can be GBs)")
+    ap.add_argument("--proof-timeout", type=float, default=0,
+                    help="time limit for drat-trim (0 = 5 x --timeout)")
+    ap.add_argument("--tmp", default=None,
+                    help="scratch folder for runs and proofs (default: system temp; needs free space)")
     args = ap.parse_args()
 
     for c in args.configs:
@@ -207,6 +239,9 @@ def main():
         exe = CONFIGS[c][1].split()[0]
         if shutil.which(exe) is None and not args.dry_run:
             sys.exit("%s not found on PATH (needed by config %s)" % (exe, c))
+    if args.proof and shutil.which("drat-trim") is None and not args.dry_run:
+        sys.exit("drat-trim not found on PATH (needed by --proof)")
+    proof_timeout = args.proof_timeout or 5 * args.timeout
 
     recs = []
     for m in args.manifest:
@@ -268,10 +303,16 @@ def main():
             inst = inst_cache[r["name"]]
         infile, tmpl, kind = CONFIGS[c]
         log_path = os.path.join(log_dir, "%s__%s__%d.log" % (r["name"], c, s))
-        work_dir = tempfile.mkdtemp(prefix="bench_")
+        work_dir = tempfile.mkdtemp(prefix="bench_", dir=args.tmp)
+        proof, proof_s, proof_mb = "", "", ""
+        want_proof = (args.proof and kind == "cnf" and tmpl.split()[0] in PROOF_SOLVERS
+                      and r["expected"] == "UNSAT" and s < args.proof_seeds)
         try:
             if kind == "cnf":
-                cmd = tmpl.format(cnf=os.path.join(r["dir"], infile), seed=s)
+                cnf_path = os.path.join(r["dir"], infile)
+                cmd = tmpl.format(cnf=cnf_path, seed=s)
+                if want_proof:
+                    cmd += " " + os.path.join(work_dir, "proof.drat")
                 cwd = work_dir
             else:
                 for fn in ("top.v", "top.sby"):
@@ -279,12 +320,22 @@ def main():
                 cmd, cwd = tmpl.format(bound=r.get("ebmc_bound", 1)), work_dir
             wall, cpu, rss, rc, to = run_one(cmd, cwd, args.timeout, log_path)
             text = open(log_path, errors="replace").read()
+            pf = os.path.join(work_dir, "proof.drat")
+            if want_proof and not to and parse_cnf_output(text, 0)[0] == "UNSAT" and os.path.exists(pf):
+                proof_mb = "%.1f" % (os.path.getsize(pf) / 1048576.0)
+                dlog = log_path[:-4] + ".drat.log"
+                pw, _, _, _, pto = run_one("drat-trim %s %s -t %d" % (cnf_path, pf, int(proof_timeout)),
+                                           work_dir, proof_timeout + 30, dlog)
+                proof = "UNCHECKED" if pto else parse_drat(open(dlog, errors="replace").read())
+                proof_s = "%.2f" % pw
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
         stats, verified = {}, ""
         if kind == "cnf":
             verdict, model, stats = parse_cnf_output(text, r.get("model_vars", r["inputs"]))
+            if proof:
+                verified = {"VERIFIED": 1, "FAILED": 0}.get(proof, "")
             if verdict == "SAT":
                 verified = verify(inst, model)
                 if verified:   # keep disk use down: models are long and already checked
@@ -314,8 +365,11 @@ def main():
             "xor_clauses": size.get("xor_clauses", ""), "returncode": rc,
             "host": host, "date": time.strftime("%Y-%m-%d %H:%M:%S"),
             "log": os.path.basename(log_path),
+            "proof": proof, "proof_s": proof_s, "proof_mb": proof_mb,
         }
         wrong = (verdict not in ("TIMEOUT", "UNKNOWN") and verdict != r["expected"]) or verified == 0
+        if r.get("family") == "miter" and verdict == "SAT":
+            wrong = True   # verified=1 here would mean the generator built a non-equivalent copy
         with lock:
             writer.writerow(row)
             out_f.flush()
