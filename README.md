@@ -14,6 +14,7 @@ Phase 1 instances are satisfiable by construction (planted solutions). Phase 2 a
 | `seq.py`, `gen_seq.py` | Sequential circuits (registers, unrolled to bound k) |
 | `miter.py`, `gen_miter.py` | Equivalence miters: each circuit against a restructured equivalent copy (UNSAT) |
 | `test_miter.py` | Exhaustive correctness checks of the miters on small circuits |
+| `check_proofs.py` | Second pass: re-solves UNSAT answers with a DRAT proof and checks it with drat-trim |
 | `run_xor_main.sh`, `run_xor3_main.sh`, `run_depth.sh`, `run_seq_pilot.sh`, `run_miter_pilot.sh`, `run_miter_grid.sh` | One-command runs for each study |
 
 All of it is standard-library Python (works with Rocky 9's `python3`). Run everything from `bash`, not tcsh.
@@ -104,7 +105,7 @@ Every gate of C still has an equivalent point inside C' (as after light logic sy
 
 **Encodings.** The same three as the SAT studies (`tseitin`, `aig`, `xnative`), applied to both circuits and to the output comparison. Inputs are variables 1..I.
 
-**Checking UNSAT answers.** With `run_bench.py --proof`, Kissat and CaDiCaL write a DRAT proof (solver seed 0 only, since proofs can be large) and `drat-trim` checks it: column `proof` = VERIFIED / FAILED / UNCHECKED (checker timed out), with `proof_s` and `proof_mb`. A FAILED proof is reported as a wrong answer. CryptoMiniSat, SBY and EBMC UNSAT answers are not proof-checked. Any SAT answer on a miter is reported as wrong; the harness also simulates both circuits on the returned input (`verified=1` would mean the copy is not equivalent, i.e. a generator bug).
+**Checking UNSAT answers.** The timed runs write no proofs, so their times compare directly with the SAT studies and nothing large is written while 20 solvers run. Afterwards `check_proofs.py` re-solves each Kissat/CaDiCaL UNSAT answer (solver seed 0) with a DRAT proof, checks it with `drat-trim`, deletes it, and writes one row per check (`proof` = VERIFIED / FAILED / UNCHECKED / SKIPPED_SIZE / SKIPPED_RESOLVE, with `proof_mb` and `proof_s`). It uses few workers (4 by default), waits while the proof folder has less than `--min-free-gb` free, and stops any proof that grows past `--max-proof-gb`, so a shared `/tmp` is never filled. A FAILED proof is printed in red. CryptoMiniSat, SBY and EBMC UNSAT answers are not proof-checked. Any SAT answer on a miter is reported as wrong; the harness also simulates both circuits on the returned input (`verified=1` would mean the copy is not equivalent, i.e. a generator bug). (`run_bench.py --proof` can also write proofs during the timed runs, but that slows the solvers and is not used by the run scripts.)
 
 **Checks done.** `test_miter.py`: on 240 small circuits (3-8 inputs, MUX/XOR3, MUX/XOR and AND/XOR gate sets, 0-100% XOR) the copy matches the original on every input, and in all three encodings every input assignment runs into a conflict by unit propagation, which proves the CNF unsatisfiable. With one copy gate broken, the CNF models are exactly the inputs where the circuits differ.
 
@@ -113,7 +114,7 @@ Every gate of C still has an equivalent point inside C' (as after light logic sy
 git clone https://github.com/marijnheule/drat-trim.git ~/drat-trim && make -C ~/drat-trim
 export PATH=~/drat-trim:$PATH        # tcsh: setenv PATH ~/drat-trim:$PATH
 ```
-Proofs are written to `--tmp` (`PROOF_TMP` in the run scripts, default `/tmp`) and deleted after checking; check free space with `df -h /tmp ~` first.
+Proofs go to `PROOF_TMP` (default `/tmp`), one per proof worker at a time, and are deleted after checking; check free space with `df -h /tmp ~` first.
 
 ## Audit of the XOR study (10 Nov)
 
