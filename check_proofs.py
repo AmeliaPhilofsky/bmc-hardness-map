@@ -73,14 +73,18 @@ def main():
     if os.path.exists(args.out):
         for row in csv.DictReader(open(args.out)):
             done.add((row["instance"], row["config"], row["solver_seed"]))
-    todo = []
+    todo, seen = [], set()
     for row in csv.DictReader(open(args.results)):
+        key = (row["instance"], row["config"], row["solver_seed"])
+        if key in seen:          # a CSV can hold a run twice (e.g. two runners at once)
+            continue
         if (row["verdict"] == "UNSAT" and row["config"] in PROOF_CONFIGS
                 and int(row["solver_seed"]) in args.seeds
                 and (not args.max_solve_s or float(row["wall_s"]) <= args.max_solve_s)
                 and (row["instance"], row["config"], row["solver_seed"]) not in done
                 and row["instance"] in dirs):
             todo.append(row)
+            seen.add(key)
     todo.sort(key=lambda r: float(r["wall_s"]))     # quick ones first
     print("%d UNSAT answers to check (%d already done), %d workers, proofs in %s (%.1f GB free)"
           % (len(todo), len(done), args.workers, args.tmp, free_gb(args.tmp)), flush=True)
