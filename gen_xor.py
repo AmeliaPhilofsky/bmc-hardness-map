@@ -49,7 +49,7 @@ def main():
     man_path = os.path.join(args.out, "manifest.jsonl")
     n_written = 0
     flagged = 0
-    with open(man_path, "w") as man:
+    with open(man_path + ".part", "w") as man:
         for n_in in args.inputs:
             n_gates = args.gates_per_input * n_in
             window = args.window or 2 * n_in
@@ -106,6 +106,7 @@ def main():
                         json.dump(dict(rec, x_star=x_star, target=target), f)
                     man.write(json.dumps(rec) + "\n")
                     n_written += 1
+    os.replace(man_path + ".part", man_path)   # only a complete manifest appears
     print("wrote %d instances to %s (%d flagged degenerate: constant or duplicate outputs)"
           % (n_written, man_path, flagged))
 

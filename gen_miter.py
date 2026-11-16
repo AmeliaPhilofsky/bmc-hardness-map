@@ -46,7 +46,7 @@ def main():
     n_written = flagged = 0
     nl = C.MUX if args.nonlinear == "mux" else C.AND
     xk = C.XOR3 if args.xor_arity == 3 else C.XOR
-    with open(man_path, "w") as man:
+    with open(man_path + ".part", "w") as man:
         for n_in in args.inputs:
             n_gates = args.gates_per_input * n_in
             for w in args.windows:
@@ -101,6 +101,7 @@ def main():
                             json.dump(rec, f)
                         man.write(json.dumps(rec) + "\n")
                         n_written += 1
+    os.replace(man_path + ".part", man_path)   # only a complete manifest appears
     print("wrote %d instances to %s (%d flagged degenerate)" % (n_written, man_path, flagged))
 
 

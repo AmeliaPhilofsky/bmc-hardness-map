@@ -46,7 +46,7 @@ def main():
     W = args.window or 2 * I
     os.makedirs(args.out, exist_ok=True)
     n_written = flagged = weak = 0
-    with open(os.path.join(args.out, "manifest.jsonl"), "w") as man:
+    with open(os.path.join(args.out, "manifest.jsonl.part"), "w") as man:
         for R in args.regs:
             for seed in range(args.seeds):
                 try:
@@ -108,6 +108,7 @@ def main():
                             json.dump(dict(rec, init=c.init, x_star=xs, targets=tg), f)
                         man.write(json.dumps(rec) + "\n")
                         n_written += 1
+    os.replace(os.path.join(args.out, "manifest.jsonl.part"), os.path.join(args.out, "manifest.jsonl"))
     print("wrote %d instances to %s (%d degenerate, %d with weak state influence)"
           % (n_written, os.path.join(args.out, "manifest.jsonl"), flagged, weak))
 
