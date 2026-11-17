@@ -197,7 +197,7 @@ def load_instance(rec):
     xk = C.XOR3 if full.get("xor_arity", 2) == 3 else C.XOR
     full["_types"] = topo.gate_types(full["xor_pct"], nl, xk)
     if full.get("family") == "miter":
-        full["_copy"] = M.Copy(topo, full["_types"], full["topo_seed"])
+        full["_copy"] = M.Copy(topo, full["_types"], full["topo_seed"], full.get("restructure", "local"))
         if len(full["_copy"].nodes) != full["copy_nodes"]:
             raise RuntimeError("rebuilt copy differs from generated one: " + rec["name"])
     return full

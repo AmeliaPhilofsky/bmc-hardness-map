@@ -39,6 +39,10 @@ def main():
     ap.add_argument("--nonlinear", choices=["mux", "and"], default="mux")
     ap.add_argument("--xor-arity", type=int, choices=[2, 3], default=3)
     ap.add_argument("--min-support", type=float, default=0.5)
+    ap.add_argument("--restructure", choices=["local", "linear"], default="local",
+                    help="local: rewrite each gate on its own (every gate keeps an equivalent "
+                         "partner); linear: rebuild every XOR region from its parities, so "
+                         "inner XOR signals have no partner")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -60,10 +64,12 @@ def main():
                     _, min_sup = topo.support_ok(args.min_support)
                     for pct in args.xor_pcts:
                         types = topo.gate_types(pct, nl, xk)
-                        copy = M.Copy(topo, types, topo.seed)
+                        copy = M.Copy(topo, types, topo.seed, args.restructure)
+                        gold_matched, copy_matched = M.match_stats(topo, types, copy)
                         func = C.functional_features(topo, types, seed=seed)
                         tag = args.nonlinear + ("3" if args.xor_arity == 3 else "")
-                        name = "mit%s_i%d_n%d_w%d_s%d_p%03d" % (tag, n_in, n_gates, window, seed, pct)
+                        prefix = "mit" if args.restructure == "local" else "mil"
+                        name = "%s%s_i%d_n%d_w%d_s%d_p%03d" % (prefix, tag, n_in, n_gates, window, seed, pct)
                         d = os.path.join(args.out, name)
                         os.makedirs(d, exist_ok=True)
                         sizes = {}
@@ -71,7 +77,7 @@ def main():
                             nv, cls, xcls = M.miter_cnf(topo, types, copy, enc)
                             C.write_dimacs(os.path.join(d, enc + ".cnf"), nv, cls, xcls,
                                            comments=[name, "encoding " + enc,
-                                                     "equivalence miter (UNSAT by construction)",
+                                                     "equivalence miter, %s copy (UNSAT by construction)" % args.restructure,
                                                      "vars 1..%d = inputs" % n_in])
                             sizes[enc] = {"vars": nv, "clauses": len(cls), "xor_clauses": len(xcls)}
                         with open(os.path.join(d, "top.v"), "w") as f:
@@ -86,7 +92,8 @@ def main():
                             "true_depth": topo.true_depth(types), "edges": topo.n_edges(types),
                             "property": "equivalence_miter", "expected": "UNSAT",
                             "inputs": n_in, "outputs": n_in, "gates": n_gates,
-                            "copy_nodes": len(copy.nodes),
+                            "copy_nodes": len(copy.nodes), "restructure": args.restructure,
+                            "gold_matched": gold_matched, "copy_matched": copy_matched,
                             "window": window, "seed": seed, "topo_seed": topo.seed,
                             "xor_pct": pct,
                             "n_xor": sum(1 for t in types if t in (C.XOR, C.XOR3)),

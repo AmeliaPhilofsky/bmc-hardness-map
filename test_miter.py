@@ -63,10 +63,10 @@ def propagate(nv, cls, xcls, assign):
     return True, a
 
 
-def check(n_in, n_gates, window, seed, pct, nonlinear, xor_kind):
+def check(n_in, n_gates, window, seed, pct, nonlinear, xor_kind, mode="local"):
     topo = C.make_topology(n_in, n_gates, n_in, window, seed, 0.0)
     types = topo.gate_types(pct, nonlinear, xor_kind)
-    copy = M.Copy(topo, types, topo.seed)
+    copy = M.Copy(topo, types, topo.seed, mode)
     for x in itertools.product([0, 1], repeat=n_in):
         v = C.simulate(topo, types, list(x))
         assert [v[o] for o in topo.outputs] == copy.outputs_of(list(x)), "copy differs"
@@ -77,8 +77,10 @@ def check(n_in, n_gates, window, seed, pct, nonlinear, xor_kind):
             assert not ok, "miter satisfiable at %s (%s)" % (x, enc)
     # break one node of the copy (AND <-> XOR) until the function changes
     rng = random.Random(seed)
+    if not copy.nodes:              # copy is pure wiring (tiny linear circuits): nothing to break
+        return False
     for _ in range(50):
-        bad = M.Copy(topo, types, topo.seed)
+        bad = M.Copy(topo, types, topo.seed, mode)
         j = rng.randrange(len(bad.nodes))
         op, la, lb = bad.nodes[j]
         bad.nodes[j] = (M.XOR2 if op == M.AND2 else M.AND2, la, lb)
@@ -107,16 +109,17 @@ def check(n_in, n_gates, window, seed, pct, nonlinear, xor_kind):
 
 
 def main():
-    n = broken = 0
-    for nonlinear, xk in ((C.MUX, C.XOR3), (C.MUX, C.XOR), (C.AND, C.XOR)):
-        for n_in in (3, 4, 6, 8):
-            for pct in (0, 30, 50, 80, 100):
-                for seed in range(4):
-                    n_gates = 4 * n_in
-                    broken += int(check(n_in, n_gates, 2 * n_in, seed, pct, nonlinear, xk))
-                    n += 1
-    print("OK: %d circuits x 3 encodings, every input assignment conflicts; "
-          "%d broken copies detected with exactly the differing inputs as models" % (n, broken))
+    for mode in ("local", "linear"):
+        n = broken = 0
+        for nonlinear, xk in ((C.MUX, C.XOR3), (C.MUX, C.XOR), (C.AND, C.XOR)):
+            for n_in in (3, 4, 6, 8):
+                for pct in (0, 30, 50, 80, 100):
+                    for seed in range(4):
+                        n_gates = 4 * n_in
+                        broken += int(check(n_in, n_gates, 2 * n_in, seed, pct, nonlinear, xk, mode))
+                        n += 1
+        print("OK (%s copy): %d circuits x 3 encodings, every input assignment conflicts; "
+              "%d broken copies detected with exactly the differing inputs as models" % (mode, n, broken))
 
 
 if __name__ == "__main__":

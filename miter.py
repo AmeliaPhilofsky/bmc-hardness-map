@@ -31,8 +31,9 @@ class Copy(object):
     A literal is (signal, neg). outputs[j] is the literal for output j.
     """
 
-    def __init__(self, topo, types, seed):
+    def __init__(self, topo, types, seed, mode="local"):
         self.n_in = topo.n_in
+        self.mode = mode
         self.nodes = []          # (op, lit_a, lit_b)
         rng = random.Random("copy-%d" % seed)
         sig = {i: (i, 0) for i in range(topo.n_in)}   # gold signal -> copy literal
@@ -45,6 +46,9 @@ class Copy(object):
             return (l[0], l[1] ^ n)
 
         self.forms = []
+        if mode == "linear":
+            self._build_linear(topo, types, rng, node, neg)
+            return
         for k in range(topo.n_gates):
             a, b = topo.fanin[k]
             ia, ib, io = topo.inv[k]
@@ -79,6 +83,88 @@ class Copy(object):
                 self.forms.append("and")
             sig[topo.n_in + k] = neg(z, io)
         self.outputs = [sig[o] for o in topo.outputs]
+
+    def _build_linear(self, topo, types, rng, node, neg):
+        """Rebuild every XOR region from its parities, so no inner XOR signal survives.
+
+        Linear form of a signal = (bitmask over basis signals, constant), where the
+        basis is the primary inputs and the outputs of nonlinear gates (MUX/AND).
+        Every XOR signal that a nonlinear gate or an output reads is rebuilt as a
+        fresh, randomly shaped tree of 2-input XORs over its basis signals.
+        """
+        n_in = topo.n_in
+        lin = {i: (1 << i, 0) for i in range(n_in)}
+        basis_lit = {i: (i, 0) for i in range(n_in)}
+        built = {}                               # (mask, const) -> copy literal
+        built_masks = {}                         # mask -> literal of that parity (const 0)
+
+        def parity(mask, const):
+            key = (mask, const)
+            if key in built:
+                return built[key]
+            # start from the closest parity already built, if that saves nodes
+            base, base_mask = None, 0
+            best = bin(mask).count("1")
+            for m_, l_ in built_masks.items():
+                d = bin(mask ^ m_).count("1") + 1
+                if d < best:
+                    best, base, base_mask = d, l_, m_
+            rest = mask ^ base_mask
+            items = [basis_lit[i] for i in range(rest.bit_length()) if rest >> i & 1]
+            if base is not None:
+                items.append(base)
+            if not items:                        # constant signal: x0 & ~x0 = 0
+                lit = node(AND2, (0, 0), (0, 1))
+            else:
+                rng.shuffle(items)
+                while len(items) > 1:            # random tree shape
+                    i = rng.randrange(len(items))
+                    x = items.pop(i)
+                    j = rng.randrange(len(items))
+                    items[j] = node(XOR2, x, items[j])
+                lit = items[0]
+            if mask and mask not in built_masks:
+                built_masks[mask] = lit          # stored without the constant
+            lit = neg(lit, const)
+            built[key] = lit
+            return lit
+
+        def lit_of(g):
+            m, c = lin[g]
+            return parity(m, c)
+
+        for k in range(topo.n_gates):
+            a, b = topo.fanin[k]
+            ia, ib, io = topo.inv[k]
+            t = types[k]
+            g = n_in + k
+            if t == C.XOR3:
+                s_ = topo.sel[k]
+                lin[g] = (lin[a][0] ^ lin[b][0] ^ lin[s_][0], lin[a][1] ^ lin[b][1] ^ lin[s_][1] ^ ia ^ ib ^ io)
+                self.forms.append("xor3_lin")
+                continue
+            if t == C.XOR:
+                lin[g] = (lin[a][0] ^ lin[b][0], lin[a][1] ^ lin[b][1] ^ ia ^ ib ^ io)
+                self.forms.append("xor2_lin")
+                continue
+            A, B = neg(lit_of(a), ia), neg(lit_of(b), ib)
+            if t == C.MUX:
+                S = lit_of(topo.sel[k])
+                if rng.random() < 0.5:
+                    t1 = node(AND2, S, A)
+                    t2 = node(AND2, neg(S), B)
+                    z = neg(node(AND2, neg(t1), neg(t2)))
+                    self.forms.append("mux_andor")
+                else:
+                    d = node(XOR2, A, B)
+                    z = node(XOR2, B, node(AND2, S, d))
+                    self.forms.append("mux_xor")
+            else:
+                z = node(AND2, A, B)
+                self.forms.append("and")
+            basis_lit[g] = neg(z, io)
+            lin[g] = (1 << g, 0)
+        self.outputs = [lit_of(o) for o in topo.outputs]
 
     def simulate(self, x_bits):
         v = list(x_bits) + [0] * len(self.nodes)
@@ -170,3 +256,46 @@ def miter_verilog(topo, types, copy, module="top"):
     L.append("  always @* assert (y == z);")
     L.append("endmodule")
     return "\n".join(L) + "\n"
+
+
+def match_stats(topo, types, copy, samples=256, seed=7):
+    """How much structure the copy shares with the original (random simulation).
+
+    gold_matched: share of original gates whose value (or its negation) equals some
+    node of the copy on every sample, i.e. that still have a partner a solver could
+    merge. copy_matched: share of copy nodes equal to some original signal.
+    """
+    rng = random.Random(seed)
+    mask = (1 << samples) - 1
+    words = [rng.getrandbits(samples) for _ in range(topo.n_in)]
+    v = list(words) + [0] * topo.n_gates
+    n_in = topo.n_in
+    for k in range(topo.n_gates):
+        a, b = topo.fanin[k]
+        ia, ib, io = topo.inv[k]
+        va = v[a] ^ (mask if ia else 0)
+        vb = v[b] ^ (mask if ib else 0)
+        t = types[k]
+        if t == C.AND:
+            r = va & vb
+        elif t == C.XOR:
+            r = va ^ vb
+        elif t == C.XOR3:
+            r = va ^ vb ^ v[topo.sel[k]]
+        else:
+            sv = v[topo.sel[k]]
+            r = (sv & va) | (~sv & mask & vb)
+        v[n_in + k] = r ^ (mask if io else 0)
+    w = list(words) + [0] * len(copy.nodes)
+    for j, (op, la, lb) in enumerate(copy.nodes):
+        xa = w[la[0]] ^ (mask if la[1] else 0)
+        xb = w[lb[0]] ^ (mask if lb[1] else 0)
+        w[n_in + j] = (xa & xb) if op == AND2 else (xa ^ xb)
+
+    def canon(x):
+        return min(x, x ^ mask)
+    gold = {canon(x) for x in v[n_in:]} | {canon(x) for x in words}
+    cp = {canon(x) for x in w[n_in:]}
+    gm = sum(1 for x in v[n_in:] if canon(x) in cp) / float(topo.n_gates)
+    cm = sum(1 for x in w[n_in:] if canon(x) in gold) / float(max(1, len(copy.nodes)))
+    return round(gm, 3), round(cm, 3)
